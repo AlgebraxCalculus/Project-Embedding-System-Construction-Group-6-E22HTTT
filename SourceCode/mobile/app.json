@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "Smart Pet Feeder",
+    "slug": "smart-pet-feeder",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#041722"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.yourname.smartpetfeeder"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#041722"
+      },
+      "package": "com.yourname.smartpetfeeder"
+    }
+  }
+}
