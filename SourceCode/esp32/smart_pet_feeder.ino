@@ -13,6 +13,7 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <esp_wifi.h>
 
 /************** WIFI CONFIG **************/
 const char* ssid     = "Nyanko Sensei";
@@ -72,6 +73,13 @@ const long  gmtOffset_sec = 7 * 3600;
 struct tm timeinfo;
 unsigned long lastTelemetry = 0;
 
+/************** POWER SAVE (ALWAYS CONNECTED) **************/
+// Keep Wi-Fi + MQTT connected so feed commands arrive immediately.
+// Save power by enabling Wi-Fi modem power save and slowing the idle loop a bit.
+static const unsigned long ACTIVE_LOOP_DELAY_MS = 50;
+static const unsigned long IDLE_LOOP_DELAY_MS   = 150;
+uint64_t lastHandledIssuedAt = 0;
+
 /************** FUNCTION PROTOTYPES **************/
 void connectWiFi();
 void reconnectMQTT();
@@ -84,6 +92,8 @@ void handleLogic();
 void sendTelemetry(bool immediate = false);
 void sendFeedingAck(const String& mode, float actualAmount, const String& status);
 bool waitForWiFi(unsigned long timeoutMs);
+bool parseIssuedAtMs(const String& issuedAtStr, uint64_t& outMs);
+void configurePowerSave();
 
 /******************** SETUP ********************/
 void setup() {
@@ -138,10 +148,15 @@ void setup() {
 
   lcd.clear(); lcd.print("System Ready");
   delay(1000);
+
+  configurePowerSave();
 }
 
 /******************** LOOP ********************/
 void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
   if (!mqtt.connected()) reconnectMQTT();
   mqtt.loop();
 
@@ -150,7 +165,7 @@ void loop() {
   handleLogic();     
 
   sendTelemetry();
-  delay(50);
+  delay(isFeeding ? ACTIVE_LOOP_DELAY_MS : IDLE_LOOP_DELAY_MS);
 }
 
 /******************** CORE LOGIC ********************/
@@ -345,8 +360,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     amount = DEFAULT_FEED_AMOUNT;
   }
 
+  // De-duplicate by issuedAt to avoid re-feeding on reconnect / retained message
+  uint64_t issuedAtMs = 0;
+  if (!parseIssuedAtMs(issuedAt, issuedAtMs)) {
+    Serial.println("Invalid issuedAt, ignoring command");
+    return;
+  }
+  if (issuedAtMs <= lastHandledIssuedAt) {
+    Serial.printf("Duplicate/old command ignored (issuedAt=%llu, lastHandled=%llu)\n",
+                  (unsigned long long)issuedAtMs,
+                  (unsigned long long)lastHandledIssuedAt);
+    return;
+  }
+
   // Nếu đang không feed thì bắt đầu
   if (!isFeeding && currentMode == "idle") {
+    lastHandledIssuedAt = issuedAtMs;
     startFeeding(mode, amount, userId, issuedAt);
   } else {
     Serial.println("Busy feeding, command ignored");
@@ -416,6 +445,7 @@ void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   waitForWiFi(15000);
+  if (WiFi.status() == WL_CONNECTED) configurePowerSave();
 }
 
 bool waitForWiFi(unsigned long timeoutMs) {
@@ -465,4 +495,20 @@ void reconnectMQTT() {
     Serial.print("Failed, rc=");
     Serial.println(mqtt.state());
   }
+}
+
+/******************** POWER SAVE HELPERS ********************/
+
+bool parseIssuedAtMs(const String& issuedAtStr, uint64_t& outMs) {
+  if (issuedAtStr.length() == 0) return false;
+  // accept numeric strings (from backend Date.now())
+  char* endp = nullptr;
+  outMs = strtoull(issuedAtStr.c_str(), &endp, 10);
+  return endp != issuedAtStr.c_str();
+}
+
+void configurePowerSave() {
+  WiFi.setSleep(true);
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+  Serial.println("WiFi power save enabled (MIN_MODEM)");
 }
