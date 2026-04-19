@@ -37,7 +37,7 @@ PubSubClient mqtt(espClient);
 /************** LCD I2C **************/
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-/************** HX711 **************/
+/************** HX711 & INTERRUPT **************/
 const int LOADCELL_DOUT_PIN = 16;
 const int LOADCELL_SCK_PIN  = 4;
 HX711 scale;
@@ -45,15 +45,22 @@ const float CALIBRATING = 413.96;
 float weightCurrentVal = 0.0;
 float weightFoodSpout  = 6.0;
 
+// Cờ báo hiệu có dữ liệu từ HX711 (dùng volatile vì thay đổi trong ngắt)
+volatile bool hx711DataReady = false; 
+
+/************** IR SENSOR CONFIG **************/
+const int irSensorPin = 27; 
+volatile bool isHopperEmpty = false;
+volatile bool hopperStateChanged = false;
+
+/************** WATCHDOG CONFIG **************/
+#define WDT_TIMEOUT 10 // Thời gian Watchdog timeout (10 giây)
+
 /************** SERVO CONFIG **************/
 const int servoPin     = 13;
 const int SERVO_STOP   = 0;   // Góc đóng
 const int SERVO_RUN    = 90;  // Góc mở (90 độ)
 Servo foodGate;
-
-/************** BUTTON & LED **************/
-const int buttonPin = 27; 
-const int ledPin    = 26;
 
 /************** FEEDING CONFIG **************/
 const float DEFAULT_FEED_AMOUNT = 10.0; // Backend mặc định cũng là 10g
@@ -84,7 +91,6 @@ uint64_t lastHandledIssuedAt = 0;
 void connectWiFi();
 void reconnectMQTT();
 void mqttCallback(char* t, byte* p, unsigned int l);
-void readButton();
 void updateWeight();
 void startFeeding(const String& mode, float amount, const String& userId, const String& issuedAt);
 void stopFeeding();
@@ -93,12 +99,21 @@ void sendTelemetry(bool immediate = false);
 void sendFeedingAck(const String& mode, float actualAmount, const String& status);
 bool waitForWiFi(unsigned long timeoutMs);
 bool parseIssuedAtMs(const String& issuedAtStr, uint64_t& outMs);
+void IRAM_ATTR irSensor_ISR();
+void sendHopperAlert();
 void configurePowerSave();
+void IRAM_ATTR hx711_isr(); 
+
 
 /******************** SETUP ********************/
 void setup() {
   Serial.begin(115200);
   delay(100);
+
+  //0. Setup Watchdog Timer (WDT)
+  esp_task_wdt_init(WDT_TIMEOUT, true); // Khởi tạo WDT, true = kích hoạt Hard Reset nếu tràn
+  esp_task_wdt_add(NULL);               // Thêm task hiện tại (loop) vào WDT
+  Serial.println("WDT Initialized (10s)");
 
   // 1. Setup I2C & LCD
   Wire.begin(21, 22);
@@ -107,12 +122,10 @@ void setup() {
   lcd.clear();
   lcd.print("Booting...");
 
-  // 2. Setup Button & LED
-  pinMode(buttonPin, INPUT_PULLUP);
-  pinMode(ledPin, OUTPUT);
-  // Test LED nháy 2 lần
-  digitalWrite(ledPin, HIGH); delay(200); digitalWrite(ledPin, LOW); delay(200);
-  digitalWrite(ledPin, HIGH); delay(200); digitalWrite(ledPin, LOW);
+  // 2. Setup IR Sensor
+  pinMode(irSensorPin, INPUT_PULLUP);
+  isHopperEmpty = digitalRead(irSensorPin);
+  attachInterrupt(digitalPinToInterrupt(irSensorPin), irSensor_ISR, CHANGE);
 
   // 3. Setup Servo (Đóng và Ngắt điện ngay để bảo vệ nguồn)
   foodGate.attach(servoPin, 500, 2400);
@@ -130,6 +143,10 @@ void setup() {
     scale.set_scale(CALIBRATING);
     scale.tare(); // Reset về 0
     Serial.println("HX711 Ready");
+
+    //Đăng ký Ngắt sườn xuống (FALLING) cho chân DOUT của HX711
+    attachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN), hx711_isr, FALLING);
+    Serial.println("HX711 Interrupt Attached");
   } else {
     Serial.println("HX711 Error");
     lcd.setCursor(0,1); lcd.print("Scale Error!");
@@ -158,14 +175,21 @@ void loop() {
     connectWiFi();
   }
   if (!mqtt.connected()) reconnectMQTT();
-  mqtt.loop();
-
-  readButton();      
+  mqtt.loop();  
   updateWeight();    
   handleLogic();     
 
   sendTelemetry();
   delay(isFeeding ? ACTIVE_LOOP_DELAY_MS : IDLE_LOOP_DELAY_MS);
+
+  // Đá chó (Reset WDT) ở cuối vòng lặp để tránh chip tự reset
+  esp_task_wdt_reset(); 
+}
+
+/******************** INTERRUPT SERVICE ROUTINES (ISR) ********************/
+// Hàm ISR kích hoạt khi chân DOUT rớt xuống LOW (Data Ready)
+void IRAM_ATTR hx711_isr() {
+  hx711DataReady = true; // Bật cờ báo hiệu có dữ liệu
 }
 
 /******************** CORE LOGIC ********************/
@@ -185,14 +209,14 @@ void startFeeding(const String& mode, float amount, const String& userId, const 
   
   // A. Reset cân về 0 để đếm lượng thức ăn mới
   if (scale.is_ready()) {
+    // Tạm tắt ngắt lúc tare để tránh xung đột
+    detachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN));
     scale.tare();
+    attachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN), hx711_isr, FALLING);
     delay(100);
   }
   
-  // B. Bật đèn LED
-  digitalWrite(ledPin, HIGH);
-  
-  // C. Mở Servo 90 độ
+  // B. Mở Servo 90 độ
   if (!foodGate.attached()) foodGate.attach(servoPin, 500, 2400);
   foodGate.write(SERVO_RUN); 
   delay(300); // Đợi servo ổn định
@@ -217,13 +241,10 @@ void stopFeeding() {
   delay(1000); // Đợi servo đóng hoàn toàn
   foodGate.detach(); 
 
-  // B. Tắt đèn
-  digitalWrite(ledPin, LOW);
-
-  // C. Lấy lượng thức ăn đã phát (đã tare từ trước)
+  // B. Lấy lượng thức ăn đã phát (đã tare từ trước)
   float actualAmount = weightCurrentVal;
   
-  // D. Xác định trạng thái kết quả
+  // C. Xác định trạng thái kết quả
   String status = "success";
   if (actualAmount < (targetWeight - WEIGHT_TOLERANCE)) {
     status = "failed"; // Không đủ lượng yêu cầu
@@ -232,10 +253,10 @@ void stopFeeding() {
     Serial.printf("SUCCESS: %.1fg dispensed\n", actualAmount);
   }
   
-  // E. Gửi ACK về backend
+  // D. Gửi ACK về backend
   sendFeedingAck(currentMode, actualAmount, status);
   
-  // F. Hiển thị kết quả
+  // E. Hiển thị kết quả
   lcd.clear();
   lcd.setCursor(0, 0);
   if (status == "success") {
@@ -273,6 +294,10 @@ void handleLogic() {
        lcd.setCursor(0, 1); 
        lcd.print("Ready           ");
     }
+    if (hopperStateChanged) {
+      hopperStateChanged = false;
+      sendHopperAlert();
+    }
     return;
   }
 
@@ -308,19 +333,6 @@ void handleLogic() {
 }
 
 /******************** INPUT HANDLERS ********************/
-
-void readButton() {
-  // Nút bấm vật lý -> Tạo lệnh Manual Feed với 10g
-  static unsigned long lastPress = 0;
-  
-  if (digitalRead(buttonPin) == LOW && !isFeeding && currentMode == "idle") {
-    if (millis() - lastPress > 1000) { // Debounce 1 giây
-      lastPress = millis();
-      Serial.println("Physical button pressed -> Manual feed 10g");
-      startFeeding("manual", DEFAULT_FEED_AMOUNT, "local-user", String(millis()));
-    }
-  }
-}
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Parse JSON từ backend
@@ -404,7 +416,7 @@ void sendTelemetry(bool immediate) {
   doc["data"]["weight"] = weightCurrentVal;
   doc["data"]["is_feeding"] = isFeeding;
   doc["data"]["mode"] = currentMode;
-  doc["data"]["led"] = digitalRead(ledPin);
+  doc["data"]["hopper_empty"] = isHopperEmpty;
   
   String output; 
   serializeJson(doc, output);
@@ -495,6 +507,32 @@ void reconnectMQTT() {
     Serial.print("Failed, rc=");
     Serial.println(mqtt.state());
   }
+}
+
+/******************** IR SENSOR INTERRUPT *******************/
+
+void IRAM_ATTR irSensor_ISR() {
+  bool currentState = digitalRead(irSensorPin);
+  if (currentState != isHopperEmpty) {
+    isHopperEmpty = currentState;
+    hopperStateChanged = true;
+  }
+}
+
+// Hàm gửi MQTT cảnh báo
+void sendHopperAlert() {
+  if (!mqtt.connected()) return;
+  StaticJsonDocument<256> doc;
+  doc["device_id"] = device_id;
+  doc["timestamp"] = millis();
+  doc["type"] = "alert";
+  doc["is_empty"] = isHopperEmpty;
+  doc["message"] = isHopperEmpty ? "Hopper Empty!" : "Hopper Refilled";
+
+  String output; serializeJson(doc, output);
+  String topic_alert = String("feeder/") + device_id + "/alert";
+  mqtt.publish(topic_alert.c_str(), output.c_str());
+  Serial.println(isHopperEmpty ? "ALERT: Hopper Empty" : "INFO: Hopper Refilled");
 }
 
 /******************** POWER SAVE HELPERS ********************/
