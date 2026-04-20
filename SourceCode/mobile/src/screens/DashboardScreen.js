@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LineChart } from 'react-native-chart-kit';
+import NotificationBell from '../components/NotificationBell';
 import { FeedAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { colors } from '../theme/colors';
@@ -69,10 +70,14 @@ export default function DashboardScreen() {
             <Text style={s.headerSub}>Thống kê cho ăn</Text>
           </View>
           <View style={s.headerRight}>
-            <Text style={s.userChip}>👤 {user?.username}</Text>
-            <TouchableOpacity style={s.logoutBtn} onPress={logout}>
-              <Text style={s.logoutText}>Đăng xuất</Text>
-            </TouchableOpacity>
+            <NotificationBell />
+            
+            <View style={s.userSection}>
+              <Text style={s.userChip}>👤 {user?.username}</Text>
+              <TouchableOpacity style={s.logoutBtn} onPress={logout}>
+                <Text style={s.logoutText}>Đăng xuất</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
 
@@ -162,7 +167,15 @@ const s = StyleSheet.create({
   },
   headerTitle: { fontSize: 22, fontWeight: '800', color: colors.textPrimary },
   headerSub: { fontSize: 13, color: colors.textSecondary, marginTop: 2 },
-  headerRight: { alignItems: 'flex-end', gap: 6 },
+  headerRight: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    gap: 12 
+  },
+  userSection: {
+    alignItems: 'flex-end',
+    gap: 6
+  },
   userChip: { fontSize: 13, color: colors.textSecondary },
   logoutBtn: {
     paddingHorizontal: 12,
