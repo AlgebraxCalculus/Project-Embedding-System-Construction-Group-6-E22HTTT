@@ -1,2 +1,2 @@
-# Project-IoT-Group-8-E22HTTT
-BTL môn Lập trình IoT với đề tài: Hệ thống cho thú cưng ăn tự động
+# Project-Embedding-System-Construction-Group-6-E22HTTT
+BTL môn Lập trình Xây dựng hệ thống nhúng với đề tài: Hệ thống cho thú cưng ăn tự động
