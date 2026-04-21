@@ -201,22 +201,26 @@ void startFeeding(const String& mode, float amount, const String& userId, const 
     return;
   }
   
-  // Lưu thông tin lệnh
   currentMode = mode;
   targetWeight = amount;
   currentUserId = userId;
   currentIssuedAt = issuedAt;
   
-  // A. Reset cân về 0 để đếm lượng thức ăn mới
+  // Reset cân về 0 một cách an toàn
   if (scale.is_ready()) {
-    // Tạm tắt ngắt lúc tare để tránh xung đột
+    // Tạm tắt ngắt
     detachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN));
-    scale.tare();
+    
+    scale.tare(); // Chạy lệnh trừ bì
+    delay(10);
+    
+    hx711DataReady = false; // Đảm bảo cờ được xóa sạch sau khi tare
+    
+    // Bật lại ngắt
     attachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN), hx711_isr, FALLING);
-    delay(100);
   }
   
-  // B. Mở Servo 90 độ
+  // Mở Servo 90 độ
   if (!foodGate.attached()) foodGate.attach(servoPin, 500, 2400);
   foodGate.write(SERVO_RUN); 
   delay(300); // Đợi servo ổn định
@@ -226,7 +230,8 @@ void startFeeding(const String& mode, float amount, const String& userId, const 
 
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print(mode); lcd.print(": "); lcd.print((int)amount); lcd.print("g");
+  lcd.print(mode); lcd.print(": ");
+  lcd.print((int)amount); lcd.print("g");
   
   Serial.printf("START FEEDING: Mode=%s, Target=%.1fg, User=%s\n", 
                 mode.c_str(), targetWeight, userId.c_str());
@@ -397,11 +402,23 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 /******************** UTILS ********************/
 
 void updateWeight() {
-  if (scale.is_ready()) {
-    float raw = scale.get_units(3); // Đọc 3 lần để lọc nhiễu
-    // Lọc giá trị âm
-    float net = raw - weightFoodSpout;  
-    weightCurrentVal = (net < 0) ? 0.0 : net;
+  // Chỉ tiến hành đọc nếu ngắt đã báo hiệu có dữ liệu mới
+  if (hx711DataReady) {
+    // 1. Tạm tắt ngắt để quá trình giao tiếp (bit-banging) không bị nhiễu
+    detachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN));
+
+    // 2. Đọc khối lượng (CHỈ ĐỌC 1 LẦN để không làm nghẽn hệ thống)
+    if (scale.is_ready()) {
+      float raw = scale.get_units(1); 
+      // Không trừ biến weightFoodSpout nữa vì đã dùng lệnh tare()
+      weightCurrentVal = (raw < 0) ? 0.0 : raw; 
+    }
+
+    // 3. Hạ cờ báo hiệu xuống
+    hx711DataReady = false;
+
+    // 4. Bật lại ngắt để chờ lần dữ liệu tiếp theo
+    attachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN), hx711_isr, FALLING);
   }
 }
 
