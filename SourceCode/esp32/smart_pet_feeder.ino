@@ -77,21 +77,35 @@ String currentUserId = "";
 String currentIssuedAt = "";
 
 /************** SERVO TIMER / FLOW PREDICTION **************/
-// Cửa sổ thời gian để phát hiện cân không tăng (stall)
+// Cửa sổ thời gian để phát hiện cân không tăng (stall) - backup path
 const unsigned long STALL_WINDOW_MS  = 800;   // ms không thấy tăng -> stall
-// Sau khi phát hiện stall, đợi thêm trước khi đóng servo
+// Sau khi predictive timer hoặc stall kích hoạt, đợi 3s cho đồ ăn đang rơi hạ xuống
 const unsigned long CLOSE_DELAY_MS   = 3000;  // 3 giây đợi đồ rơi hết
+// Số mẫu tối thiểu để flowRate đủ ổn định trước khi tính predictive timer
+const int           FLOW_STABLE_SAMPLES = 5;
+// Ngưỡng flowRate tối thiểu để coi là đang chảy (g/s)
+const float         FLOW_MIN_RATE     = 0.3f;
 
 // Trạng thái theo dõi tốc độ rơi
 float    flowLastWeight     = 0.0;   // Trọng lượng tại lần kiểm tra trước
 unsigned long flowLastTime  = 0;     // Thời điểm lần kiểm tra trước
-float    flowRate           = 0.0;   // g/s tính được (đà rơi hiện tại)
+float    flowRate           = 0.0;   // g/s tính được (EMA)
+int      flowSampleCount    = 0;     // Số mẫu đã tích lũy
 
-// Trạng thái stall & đóng servo
-bool     stallDetected      = false; // Đã phát hiện stall chưa
-unsigned long stallStartMs  = 0;     // Thời điểm phát hiện stall
-bool     servoClosing       = false; // Đang trong giai đoạn đợi 3s trước khi dừng
+// ── Predictive Close Timer (Primary path)
+// Được tính lại mỗi chu kỳ: predictedCloseAt = now + (remaining / flowRate) * 1000
+// Khi millis() >= predictedCloseAt -> bắt đầu giai đoạn CLOSE_DELAY
+bool          timerArmed         = false;  // Timer đã được kích hoạt chưa
+unsigned long predictedCloseAt  = 0;     // Timestamp (ms) dự đoán đóng servo
+
+// ── Stall Detection (Backup path)
+bool     stallDetected      = false;
+unsigned long stallStartMs  = 0;
+
+// ── Close-Delay State (dùng chung cho cả 2 path)
+bool     servoClosing       = false; // Đang trong giai đoạn đợi 3s
 unsigned long servoCloseStartMs = 0;
+float    weightAtCloseStart = 0.0;  // Trọng lượng tại thời điểm bắt đầu close-delay
 
 // Mốc trọng lượng cuối dùng để phát hiện stall
 float    weightAtStallCheck = 0.0;
@@ -126,6 +140,8 @@ void IRAM_ATTR hx711_isr();
 void resetFlowTracker();
 void updateFlowRate();
 bool checkStall();
+void armPredictiveTimer();
+void enterCloseDelay(const char* reason);
 
 
 /******************** SETUP ********************/
@@ -210,44 +226,79 @@ void resetFlowTracker() {
   flowLastWeight      = 0.0;
   flowLastTime        = millis();
   flowRate            = 0.0;
+  flowSampleCount     = 0;
+  timerArmed          = false;
+  predictedCloseAt    = 0;
   stallDetected       = false;
   stallStartMs        = 0;
   servoClosing        = false;
   servoCloseStartMs   = 0;
+  weightAtCloseStart  = 0.0;
   weightAtStallCheck  = 0.0;
   stallCheckTime      = millis();
 }
 
-// Cập nhật tốc độ rơi (g/s) mỗi khi có đọc cân mới
+// Cập nhật tốc độ rơi (g/s) - EMA alpha=0.35 để phản ứng nhanh nhưng vẫn mượt
 void updateFlowRate() {
   unsigned long now = millis();
-  float elapsed = (now - flowLastTime) / 1000.0f; // seconds
-  if (elapsed < 0.05f) return; // Tránh chia zero
+  float elapsed = (now - flowLastTime) / 1000.0f;
+  if (elapsed < 0.05f) return;
 
   float delta = weightCurrentVal - flowLastWeight;
   if (delta > 0.0f) {
-    // EMA (Exponential Moving Average) với alpha = 0.3 để làm mượt
     float instantRate = delta / elapsed;
-    flowRate = 0.3f * instantRate + 0.7f * flowRate;
+    if (flowSampleCount == 0) {
+      flowRate = instantRate; // Mẫu đầu tiên: gán thẳng
+    } else {
+      flowRate = 0.35f * instantRate + 0.65f * flowRate; // EMA
+    }
+    flowSampleCount++;
   }
   flowLastWeight = weightCurrentVal;
   flowLastTime   = now;
 }
 
+// Tính (hoặc cập nhật) predictedCloseAt dựa trên flowRate hiện tại
+// Được gọi mỗi vòng loop khi chưa vào close-delay, để ETA luôn chính xác
+void armPredictiveTimer() {
+  if (servoClosing) return;               // Đã vào close-delay, không cập nhật nữa
+  if (flowRate < FLOW_MIN_RATE) return;   // Chưa đủ flow để tính
+  if (flowSampleCount < FLOW_STABLE_SAMPLES) return; // Chờ đủ mẫu ổn định
+
+  float remaining = targetWeight - weightCurrentVal;
+  if (remaining <= 0) return;
+
+  // Thời gian ước tính (ms) để phần còn lại rơi xuống
+  unsigned long etaMs = (unsigned long)((remaining / flowRate) * 1000.0f);
+
+  predictedCloseAt = millis() + etaMs;
+  timerArmed = true;
+}
+
+// Kích hoạt giai đoạn close-delay (dùng chung cho predictive timer & stall)
+void enterCloseDelay(const char* reason) {
+  if (servoClosing) return; // Đã vào rồi, không kích hoạt lại
+  servoClosing        = true;
+  servoCloseStartMs   = millis();
+  weightAtCloseStart  = weightCurrentVal;
+
+  float pct    = (targetWeight > 0) ? (weightCurrentVal / targetWeight * 100.0f) : 0.0f;
+  Serial.printf("[%s] %.1fg/%.1fg (%.0f%%) | flowRate=%.2fg/s -> Wait %.0fs for in-flight food\n",
+                reason, weightCurrentVal, targetWeight, pct, flowRate,
+                CLOSE_DELAY_MS / 1000.0f);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Wait 3s...      ");
+}
+
 // Kiểm tra xem cân có đang "stall" (không tăng) trong STALL_WINDOW_MS không
-// Trả về true nếu stall (đồ ăn đã ngừng rơi)
 bool checkStall() {
   unsigned long now = millis();
-
-  // Cứ mỗi STALL_WINDOW_MS, so sánh với mốc trước
   if (now - stallCheckTime >= STALL_WINDOW_MS) {
     float gained = weightCurrentVal - weightAtStallCheck;
     weightAtStallCheck = weightCurrentVal;
     stallCheckTime = now;
-
-    if (gained < 0.3f) { // Tăng chưa đến 0.3g trong cửa sổ -> stall
-      return true;
-    }
+    if (gained < 0.3f) return true;
   }
   return false;
 }
@@ -392,83 +443,96 @@ void handleLogic() {
     return;
   }
 
-  // ── ĐIỀU KIỆN 3: SERVO TIMER - Phát hiện stall & đếm ngược 3s trước khi đóng
+  // ── ĐIỀU KIỆN 3: SERVO TIMER (PRIMARY) + STALL DETECTION (BACKUP)
   //
-  // Thuật toán:
-  //  a) Liên tục tính flowRate (g/s) và % đã rơi được.
-  //  b) Ước tính thời gian cần thêm = (target - current) / flowRate.
-  //  c) Nếu cân không tăng trong STALL_WINDOW_MS -> kích hoạt close-delay 3s.
-  //  d) Trong 3s đó nếu cân bắt đầu tăng lại -> hủy stall, tiếp tục cho ăn.
-  //  e) Sau đủ 3s stall -> stopFeeding().
+  // PRIMARY  – Predictive Close Timer:
+  //   a) Liên tục đo flowRate (g/s) bằng EMA.
+  //   b) Khi có đủ mẫu ổn định, tính predictedCloseAt = now + (remaining/flowRate)*1000.
+  //   c) Khi millis() >= predictedCloseAt -> enterCloseDelay("TIMER") -> đợi 3s
+  //      để phần đồ ăn đang lơ lửng hạ xuống cân.
+  //   d) Trong 3s close-delay: nếu cân chạm target -> stopFeeding() ngay.
+  //   e) Sau 3s close-delay -> stopFeeding() với lượng đã đạt.
+  //
+  // BACKUP   – Stall Detection:
+  //   Nếu predictive timer chưa arm (flowRate chưa ổn) hoặc bị sai,
+  //   stall detection sẽ kích hoạt enterCloseDelay("STALL") độc lập.
 
   if (!servoClosing) {
-    // Kiểm tra stall
-    if (checkStall()) {
+    // ── Cập nhật & arm predictive timer
+    armPredictiveTimer();
+
+    // PRIMARY: Timer đã arm và đã đến giờ đóng
+    if (timerArmed && now >= predictedCloseAt) {
+      enterCloseDelay("TIMER");
+    }
+    // BACKUP: Stall detection (chạy song song, kích hoạt khi flowRate còn thấp hoặc timer miss)
+    else if (checkStall()) {
       if (!stallDetected) {
-        stallDetected    = true;
-        stallStartMs     = now;
-        servoClosing     = true;
-        servoCloseStartMs = now;
-
-        float pct = (currentAmount / targetWeight) * 100.0f;
-        float etaSec = (flowRate > 0.05f)
-                        ? ((targetWeight - currentAmount) / flowRate)
-                        : -1.0f;
-
-        Serial.printf("[STALL] %.1fg/%.1fg (%.0f%%) | flowRate=%.2fg/s | ETA=%.1fs -> Closing in 3s\n",
-                      currentAmount, targetWeight, pct, flowRate,
-                      etaSec >= 0 ? etaSec : 0.0f);
-
-        lcd.setCursor(0, 1);
-        lcd.print("Stall! Wait 3s  ");
+        stallDetected = true;
+        stallStartMs  = now;
+        enterCloseDelay("STALL");
       }
     }
   } else {
-    // Đang trong giai đoạn đợi 3s
-    float gained = weightCurrentVal - flowLastWeight; // tăng kể từ khi stall
+    // ── Đang trong giai đoạn close-delay (3s)
+    float gainedSinceClose = weightCurrentVal - weightAtCloseStart;
 
-    // Nếu cân bắt đầu tăng lại -> hủy stall, tiếp tục mở servo
-    if (gained > 0.3f) {
-      Serial.println("[STALL CANCEL] Weight increasing again, resuming.");
-      stallDetected   = false;
-      servoClosing    = false;
-      flowLastWeight  = weightCurrentVal; // reset mốc
+    // Nếu thấy cân tăng đáng kể trong 3s -> đồ ăn vẫn đang rơi, chờ tiếp
+    // Chỉ cancel nếu timer chưa hết và lượng còn xa target
+    bool canCancel = !timerArmed  // Chưa có predictive timer -> stall cancel được
+                     && gainedSinceClose > 0.5f
+                     && currentAmount < (targetWeight - WEIGHT_TOLERANCE * 2);
+    if (canCancel) {
+      Serial.printf("[STALL CANCEL] +%.1fg since close start, resuming.\n", gainedSinceClose);
+      stallDetected      = false;
+      servoClosing       = false;
+      weightAtCloseStart = weightCurrentVal;
+      // Cập nhật lại mốc stall check
+      weightAtStallCheck = weightCurrentVal;
+      stallCheckTime     = now;
     }
-    // Đủ 3s stall -> đóng servo
+    // Hết 3s -> đóng servo với lượng hiện tại
     else if (now - servoCloseStartMs >= CLOSE_DELAY_MS) {
-      Serial.printf("[CLOSE] Stall confirmed %.0fms, stopping. Final=%.1fg\n",
-                    (float)(now - stallStartMs), currentAmount);
+      Serial.printf("[CLOSE] After %.0fs delay: final=%.1fg/%.1fg\n",
+                    CLOSE_DELAY_MS / 1000.0f, currentAmount, targetWeight);
       stopFeeding();
       return;
     }
   }
 
-  // ── Cập nhật LCD tiến độ + ETA
+  // ── Cập nhật LCD tiến độ + ETA mỗi 300ms
   static unsigned long lastLcdUpdate = 0;
   if (now - lastLcdUpdate > 300) {
     lastLcdUpdate = now;
-    float pct    = (targetWeight > 0) ? (currentAmount / targetWeight * 100.0f) : 0.0f;
-    float etaSec = (flowRate > 0.05f && !servoClosing)
-                    ? ((targetWeight - currentAmount) / flowRate)
-                    : 0.0f;
+    float pct = (targetWeight > 0) ? (currentAmount / targetWeight * 100.0f) : 0.0f;
 
     lcd.setCursor(0, 0);
     lcd.print(currentMode); lcd.print(": ");
     lcd.print((int)targetWeight); lcd.print("g   ");
 
-    if (!servoClosing) {
-      lcd.setCursor(0, 1);
-      // Hiển thị: "3/10g ETA:2s   "
-      char buf[17];
-      if (etaSec > 0)
-        snprintf(buf, sizeof(buf), "%.0f/%.0fg ETA:%.0fs  ",
-                 currentAmount, targetWeight, etaSec);
-      else
-        snprintf(buf, sizeof(buf), "%.0f/%.0fg (%.0f%%)  ",
-                 currentAmount, targetWeight, pct);
-      lcd.print(buf);
+    lcd.setCursor(0, 1);
+    char buf[17];
+    if (servoClosing) {
+      // Hiển thị đếm ngược 3s
+      unsigned long remaining3s = CLOSE_DELAY_MS - (now - servoCloseStartMs);
+      snprintf(buf, sizeof(buf), "%.0f/%.0fg cls:%lus",
+               currentAmount, targetWeight, remaining3s / 1000UL);
+    } else if (timerArmed && predictedCloseAt > now) {
+      // Hiển thị ETA theo predictive timer
+      float etaSec = (predictedCloseAt - now) / 1000.0f;
+      snprintf(buf, sizeof(buf), "%.0f/%.0fg ETA:%.0fs",
+               currentAmount, targetWeight, etaSec);
+    } else if (flowRate >= FLOW_MIN_RATE) {
+      // flowRate có nhưng timer chưa arm đủ mẫu
+      float etaSec = (targetWeight - currentAmount) / flowRate;
+      snprintf(buf, sizeof(buf), "%.0f/%.0fg~%.0fs",
+               currentAmount, targetWeight, etaSec);
+    } else {
+      // Chưa có flow rate đủ tin cậy
+      snprintf(buf, sizeof(buf), "%.0f/%.0fg (%.0f%%)",
+               currentAmount, targetWeight, pct);
     }
-    // Nếu đang servoClosing, LCD đã hiện "Stall! Wait 3s"
+    lcd.print(buf);
   }
 }
 
