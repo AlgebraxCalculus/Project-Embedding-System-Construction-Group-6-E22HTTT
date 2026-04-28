@@ -1,3 +1,7 @@
+// Suppress ONNX Runtime verbose graph-optimization warnings (e.g. "Removing initializer...")
+// Must be set before onnxruntime-node is loaded (happens lazily via @xenova/transformers).
+process.env.ORT_LOGGING_LEVEL = process.env.ORT_LOGGING_LEVEL || '3'; // 3 = ERROR only
+
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
@@ -22,7 +26,12 @@ class SpeechService {
    */
   async getPipeline() {
     if (!this.pipelinePromise) {
-      this.pipelinePromise = import('@xenova/transformers').then(async ({ pipeline }) => {
+      this.pipelinePromise = import('@xenova/transformers').then(async ({ pipeline, env }) => {
+        // Belt-and-suspenders: also suppress via transformers env if the property exists
+        if (env?.backends?.onnx) {
+          env.backends.onnx.logLevel = 'error';
+        }
+
         console.log(`🔁 Loading Whisper model: ${this.modelName} (quantized=${this.modelQuantized})`);
         const start = Date.now();
         const whisperPipeline = await pipeline('automatic-speech-recognition', this.modelName, {

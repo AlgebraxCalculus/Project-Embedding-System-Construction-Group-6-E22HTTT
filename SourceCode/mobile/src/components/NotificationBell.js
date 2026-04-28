@@ -40,8 +40,32 @@ export default function NotificationBell() {
     setLoading(true);
     try {
       const response = await FeedAPI.history(50);
-      const data = response.data?.data || [];
-      setNotifications(data);
+      const feedLogs = response.data?.feedLogs || [];
+      const mapped = feedLogs.map((log) => {
+        const isSuccess = log.status === 'success';
+        const amount = Number(log.amount ?? 0);
+        const target = Number(log.targetAmount ?? amount);
+        const amountStr = amount.toFixed(1);
+        const targetStr = target.toFixed(0);
+        const methodPrefix =
+          log.feedType === 'scheduled' ? 'Lịch cho ăn'
+          : log.feedType === 'voice' ? 'Giọng nói'
+          : 'Cho ăn thủ công';
+        const message = isSuccess
+          ? `${methodPrefix} ${amountStr}g thành công`
+          : `${methodPrefix} thất bại (${amountStr}g/${targetStr}g)`;
+        return {
+          _id: log._id,
+          message,
+          method: log.feedType,
+          amount,
+          status: log.status,
+          transcript: log.voiceCommand,
+          createdAt: log.startTime || log.createdAt,
+          read: true,
+        };
+      });
+      setNotifications(mapped);
     } catch (error) {
       console.error('Lỗi khi tải thông báo API:', error);
     } finally {
@@ -55,14 +79,28 @@ export default function NotificationBell() {
 
     const mqttClient = createMqttClient({
       onAck: (data, rawPayload) => {
-        const amount = extractAckAmount(data);
-        const method = isScheduledAckPayload(data) ? 'scheduled' : 'manual';
-        
+        const amount = Number(extractAckAmount(data) ?? 0);
+        const target = Number(data.targetAmount ?? amount);
+        const isSuccess = data.status === 'success';
+        const isScheduled = isScheduledAckPayload(data);
+        const method = isScheduled ? 'scheduled' : (data.mode || 'manual');
+        const amountStr = amount.toFixed(1);
+        const targetStr = target.toFixed(0);
+
+        const methodPrefix =
+          method === 'scheduled' ? 'Lịch cho ăn'
+          : method === 'voice' ? 'Giọng nói'
+          : 'Cho ăn thủ công';
+        const message = isSuccess
+          ? `${methodPrefix} ${amountStr}g thành công`
+          : `${methodPrefix} thất bại (${amountStr}g/${targetStr}g)`;
+
         const newNotification = {
           _id: Date.now().toString(),
-          message: 'Thiết bị đã cho ăn thành công',
-          method: method,
-          amount: amount,
+          message,
+          method,
+          amount,
+          status: isSuccess ? 'success' : 'failed',
           createdAt: new Date().toISOString(),
           read: false,
         };

@@ -27,6 +27,11 @@ const upload = multer({
       'audio/mpeg',
       'audio/ogg',
       'audio/opus',
+      'audio/aac',
+      'audio/mp4',
+      'audio/x-m4a',
+      'audio/m4a',
+      'video/mp4', // some Android encoders report M4A as video/mp4
     ];
     
     if (allowedMimes.includes(file.mimetype)) {

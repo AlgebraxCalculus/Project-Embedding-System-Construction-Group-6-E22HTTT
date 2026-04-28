@@ -68,25 +68,41 @@ const ManualFeed = () => {
     setAckMessage('Đang gửi lệnh cho ăn...');
     try {
       const { data } = await FeedAPI.manual();
-      const amount = data.feedLog?.amount || 10;
-      const message = language === 'vi-VN' 
-        ? `✅ Đã cho ăn ${amount}g thành công!`
-        : `✅ Successfully fed ${amount}g!`;
+      const feedLog = data.feedLog || {};
+      const amount = Number(feedLog.amount ?? 0);
+      const target = Number(feedLog.targetAmount ?? 10);
+      const isSuccess = feedLog.status === 'success';
+      const amountStr = amount.toFixed(1);
+      const targetStr = target.toFixed(0);
+
+      const message = isSuccess
+        ? (language === 'vi-VN'
+            ? `✅ Đã cho ăn ${amountStr}g thành công!`
+            : `✅ Successfully fed ${amountStr}g!`)
+        : (language === 'vi-VN'
+            ? `❌ Cho ăn thất bại: chỉ phát được ${amountStr}g / ${targetStr}g`
+            : `❌ Feed failed: only dispensed ${amountStr}g / ${targetStr}g`);
       setAckMessage(message);
       setToast({
-        message: language === 'vi-VN' 
-          ? `Đã cho ăn ${amount} gram`
-          : `Fed ${amount} grams`,
-        type: 'success',
+        message: isSuccess
+          ? (language === 'vi-VN' ? `Đã cho ăn ${amountStr} gram` : `Fed ${amountStr} grams`)
+          : (language === 'vi-VN'
+              ? `Cho ăn thất bại (${amountStr}g/${targetStr}g)`
+              : `Feed failed (${amountStr}g/${targetStr}g)`),
+        type: isSuccess ? 'success' : 'error',
       });
       addNotification({
         method: 'manual',
         amount,
-        type: 'success',
+        type: isSuccess ? 'success' : 'error',
         message:
-          language === 'vi-VN'
-            ? `Cho ăn thủ công ${amount}g thành công`
-            : `Manual feed ${amount}g successful`,
+          isSuccess
+            ? (language === 'vi-VN'
+                ? `Cho ăn thủ công ${amountStr}g thành công`
+                : `Manual feed ${amountStr}g successful`)
+            : (language === 'vi-VN'
+                ? `Cho ăn thủ công thất bại (${amountStr}g/${targetStr}g)`
+                : `Manual feed failed (${amountStr}g/${targetStr}g)`),
       });
     } catch (err) {
       const errorMsg = err.response?.data?.message || 'Failed to send feed command';
@@ -194,31 +210,50 @@ const ManualFeed = () => {
         try {
           setLoading(true);
           const { data: feedData } = await FeedAPI.voice(transcript);
-          const feedAmount = feedData.feedLog?.amount || feedData.parsedAmount || detectedAmount;
-          
-          // Hiển thị kết quả với transcript và số lượng
-          if (language === 'vi-VN') {
-            setAckMessage(`🎙️ Đã nghe: "${transcript}"\n✅ Đã cho ăn ${feedAmount}g thành công!`);
+          const feedLog = feedData.feedLog || {};
+          const feedAmount = Number(feedLog.amount ?? feedData.parsedAmount ?? detectedAmount);
+          const target = Number(feedLog.targetAmount ?? detectedAmount);
+          const isSuccess = feedLog.status === 'success';
+          const amountStr = feedAmount.toFixed(1);
+          const targetStr = target.toFixed(0);
+
+          if (isSuccess) {
+            if (language === 'vi-VN') {
+              setAckMessage(`🎙️ Đã nghe: "${transcript}"\n✅ Đã cho ăn ${amountStr}g thành công!`);
+            } else {
+              setAckMessage(`🎙️ Heard: "${transcript}"\n✅ Successfully fed ${amountStr}g!`);
+            }
           } else {
-            setAckMessage(`🎙️ Heard: "${transcript}"\n✅ Successfully fed ${feedAmount}g!`);
+            if (language === 'vi-VN') {
+              setAckMessage(`🎙️ Đã nghe: "${transcript}"\n❌ Cho ăn thất bại: chỉ phát được ${amountStr}g/${targetStr}g`);
+            } else {
+              setAckMessage(`🎙️ Heard: "${transcript}"\n❌ Feed failed: only dispensed ${amountStr}g/${targetStr}g`);
+            }
           }
-          
-          // Popup notification
+
           setToast({
-            message: language === 'vi-VN' 
-              ? `Đã cho ăn ${feedAmount} gram\n(Lệnh: "${transcript}")`
-              : `Fed ${feedAmount} grams\n(Command: "${transcript}")`,
-            type: 'success',
+            message: isSuccess
+              ? (language === 'vi-VN'
+                  ? `Đã cho ăn ${amountStr} gram\n(Lệnh: "${transcript}")`
+                  : `Fed ${amountStr} grams\n(Command: "${transcript}")`)
+              : (language === 'vi-VN'
+                  ? `Cho ăn thất bại (${amountStr}g/${targetStr}g)\n(Lệnh: "${transcript}")`
+                  : `Feed failed (${amountStr}g/${targetStr}g)\n(Command: "${transcript}")`),
+            type: isSuccess ? 'success' : 'error',
           });
           addNotification({
             method: 'voice',
             amount: feedAmount,
             transcript,
-            type: 'success',
+            type: isSuccess ? 'success' : 'error',
             message:
-              language === 'vi-VN'
-                ? `Giọng nói: cho ăn ${feedAmount}g`
-                : `Voice feed ${feedAmount}g`,
+              isSuccess
+                ? (language === 'vi-VN'
+                    ? `Giọng nói: cho ăn ${amountStr}g`
+                    : `Voice feed ${amountStr}g`)
+                : (language === 'vi-VN'
+                    ? `Giọng nói thất bại (${amountStr}g/${targetStr}g)`
+                    : `Voice feed failed (${amountStr}g/${targetStr}g)`),
           });
         } catch (err) {
           console.error('Voice feed error:', err);

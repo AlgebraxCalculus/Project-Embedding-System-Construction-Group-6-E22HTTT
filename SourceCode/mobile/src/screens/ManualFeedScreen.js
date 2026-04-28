@@ -59,8 +59,18 @@ export default function ManualFeedScreen() {
     setAckMessage('Đang gửi lệnh cho ăn...');
     try {
       const { data } = await FeedAPI.manual();
-      const amount = data.feedLog?.amount || 10;
-      setAckMessage(`✅ Đã cho ăn ${amount}g thành công!`);
+      const feedLog = data.feedLog || {};
+      const amount = Number(feedLog.amount ?? 0);
+      const target = Number(feedLog.targetAmount ?? 10);
+      const isSuccess = feedLog.status === 'success';
+      const amountStr = amount.toFixed(1);
+      const targetStr = target.toFixed(0);
+
+      setAckMessage(
+        isSuccess
+          ? `✅ Đã cho ăn ${amountStr}g thành công!`
+          : `❌ Cho ăn thất bại: chỉ phát được ${amountStr}g / ${targetStr}g`
+      );
     } catch (err) {
       const msg = err.response?.data?.message || 'Gửi lệnh thất bại';
       setAckMessage(`❌ ${msg}`);
@@ -121,8 +131,18 @@ export default function ManualFeedScreen() {
 
       // Step 2: Send transcribed text to backend voice endpoint
       const { data } = await FeedAPI.voice(text);
-      const amount = data.feedLog?.amount || data.parsedAmount || 10;
-      setAckMessage(`Lenh: "${text}"\nDa cho an ${amount}g thanh cong!`);
+      const feedLog = data.feedLog || {};
+      const amount = Number(feedLog.amount ?? data.parsedAmount ?? 0);
+      const target = Number(feedLog.targetAmount ?? data.parsedAmount ?? 10);
+      const isSuccess = feedLog.status === 'success';
+      const amountStr = amount.toFixed(1);
+      const targetStr = target.toFixed(0);
+
+      setAckMessage(
+        isSuccess
+          ? `Lenh: "${text}"\nDa cho an ${amountStr}g thanh cong!`
+          : `Lenh: "${text}"\nCho an that bai: chi phat duoc ${amountStr}g / ${targetStr}g`
+      );
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Gui lenh that bai';
       setAckMessage(`Loi: ${msg}`);

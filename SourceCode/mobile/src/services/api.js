@@ -1,7 +1,7 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:5000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://10.45.113.183:5000';
 const SPEECH_URL = process.env.EXPO_PUBLIC_SPEECH_URL || BASE_URL.replace(':5000', ':3001');
 
 const api = axios.create({ baseURL: BASE_URL });
@@ -34,18 +34,29 @@ export const FeedAPI = {
   history: (limit = 20) => api.get('/api/feed/history', { params: { limit } }),
 };
 
+const AUDIO_MIME_MAP = {
+  m4a: 'audio/mp4',
+  mp4: 'audio/mp4',
+  aac: 'audio/aac',
+  ogg: 'audio/ogg',
+  webm: 'audio/webm',
+  wav: 'audio/wav',
+};
+
 export const SpeechAPI = {
   transcribe: (fileUri) => {
+    const ext = fileUri.split('.').pop()?.toLowerCase() ?? 'wav';
+    const mimeType = AUDIO_MIME_MAP[ext] ?? 'audio/wav';
     const formData = new FormData();
     formData.append('audio', {
       uri: fileUri,
-      type: 'audio/wav',
-      name: 'recording.wav',
+      type: mimeType,
+      name: `recording.${ext}`,
     });
     formData.append('languageCode', 'vi-VN');
     return axios.post(`${SPEECH_URL}/api/speech-to-text`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 30000,
+      timeout: 60000,
     });
   },
 };

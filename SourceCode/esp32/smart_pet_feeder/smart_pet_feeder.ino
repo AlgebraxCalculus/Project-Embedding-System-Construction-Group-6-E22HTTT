@@ -10,8 +10,6 @@
  *    kích hoạt servo đóng (3s delay) để đảm bảo đồ ăn đã rơi hết xuống.
  ****************************************************/
 
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 #include <HX711.h>
 #include <ESP32Servo.h>
 #include <WiFi.h>
@@ -39,35 +37,50 @@ String topic_ack          = String("feeder/") + device_id + "/ack";
 WiFiClientSecure espClient;
 PubSubClient mqtt(espClient);
 
-/************** LCD I2C **************/
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-
 /************** HX711 & INTERRUPT **************/
 const int LOADCELL_DOUT_PIN = 16;
 const int LOADCELL_SCK_PIN  = 4;
 HX711 scale;
 const float CALIBRATING = 413.96;
+// Số sample để average mỗi lần đọc - dùng 3 để giảm nhiễu HX711 mà không quá chậm.
+const uint8_t HX711_READ_SAMPLES = 3;
 float weightCurrentVal = 0.0;
-float weightFoodSpout  = 6.0;
+float weightRawVal     = 0.0;  // Raw không clamp - dùng cho diagnostic, có thể âm
+// LƯU Ý VỀ BÁT ĂN: scale.tare() được gọi đầu mỗi lần feeding (xem startFeeding()),
+// nó tự lấy lượng cân hiện tại làm "0". Nếu BÁT ĂN đã được đặt trên cân TRƯỚC khi
+// lệnh feed gửi xuống → bát được trừ ra tự động, không cần code thêm.
+// QUAN TRỌNG: bát phải nằm yên trên cân TRƯỚC lúc bấm feed; nếu đặt bát SAU khi
+// đã tare, hệ thống sẽ hiểu trọng lượng bát là đồ ăn.
 
 // Cờ báo hiệu có dữ liệu từ HX711 (dùng volatile vì thay đổi trong ngắt)
 volatile bool hx711DataReady = false;
 
+// Chu kỳ in log cân nặng ra Serial (ms). Đặt 500ms = 2Hz, đủ để theo dõi mà
+// không spam. Khi đang feeding, log sẽ kèm % và flowRate.
+const unsigned long WEIGHT_LOG_INTERVAL_MS = 500;
+
 /************** IR SENSOR CONFIG **************/
 const int irSensorPin = 27;
 volatile bool isHopperEmpty = false;
-volatile bool hopperStateChanged = false;
+// Debounce + rate-limit để tránh spam alert khi cảm biến IR rung ở ngưỡng
+volatile unsigned long lastIrEdgeMs = 0;
+const unsigned long IR_DEBOUNCE_MS         = 800;     // Chờ tín hiệu ổn định 800ms
+const unsigned long IR_ALERT_MIN_INTERVAL  = 30000;   // Tối thiểu 30s giữa 2 alert MQTT
+bool stableHopperEmpty = false;       // State đã debounce
+unsigned long lastHopperAlertMs = 0;
 
 /************** SERVO CONFIG **************/
 const int servoPin     = 13;
-const int SERVO_STOP   = 0;   // Góc đóng
-const int SERVO_RUN    = 90;  // Góc mở (90 độ)
+const int SERVO_STOP   = 170;   // Góc đóng
+const int SERVO_RUN    = 100;  // Góc mở (90 độ)
 Servo foodGate;
 
 /************** FEEDING CONFIG **************/
 const float DEFAULT_FEED_AMOUNT = 10.0;
 const unsigned long MAX_FEED_TIME = 30000; // 30 giây timeout an toàn
-const float WEIGHT_TOLERANCE = 0.5;        // Dung sai ±0.5g
+// Strict mode: success requires actualAmount >= targetWeight.
+// Float noise margin chỉ dùng để chấp nhận bằng đúng (e.g. 9.999 ~= 10.000).
+const float SUCCESS_EPSILON = 0.05;        // 50 mg float noise margin
 
 bool isFeeding = false;
 float targetWeight = 0;
@@ -78,13 +91,22 @@ String currentIssuedAt = "";
 
 /************** SERVO TIMER / FLOW PREDICTION **************/
 // Cửa sổ thời gian để phát hiện cân không tăng (stall) - backup path
-const unsigned long STALL_WINDOW_MS  = 800;   // ms không thấy tăng -> stall
-// Sau khi predictive timer hoặc stall kích hoạt, đợi 3s cho đồ ăn đang rơi hạ xuống
+const unsigned long STALL_WINDOW_MS  = 2000;  // ms không thấy tăng -> stall
+// Thời gian grace period sau khi bắt đầu feeding trước khi kiểm tra stall.
+// Phải đủ dài cho đồ ăn rơi từ hopper xuống cân (đo thực tế ~3s).
+const unsigned long STALL_GRACE_MS   = 5000;  // 5s để servo mở và thức ăn rơi xuống cân
+// Sau khi predictive timer hoặc stall kích hoạt, đóng servo rồi đợi 3s cho đồ ăn rơi hết
 const unsigned long CLOSE_DELAY_MS   = 3000;  // 3 giây đợi đồ rơi hết
 // Số mẫu tối thiểu để flowRate đủ ổn định trước khi tính predictive timer
 const int           FLOW_STABLE_SAMPLES = 5;
 // Ngưỡng flowRate tối thiểu để coi là đang chảy (g/s)
 const float         FLOW_MIN_RATE     = 0.3f;
+// Ngưỡng delta tối thiểu (g) để 1 sample được coi là "đồ ăn rơi thật" thay vì nhiễu HX711.
+// HX711 thường nhiễu ±0.05g khi cân tĩnh; đặt 0.15g để loại nhiễu mà vẫn bắt được hạt nhỏ.
+const float         FLOW_NOISE_THRESHOLD = 0.15f;
+// Trọng lượng tối thiểu (g) để xác nhận "đồ ăn đã bắt đầu rơi" -> mở khoá stall detection.
+// Trước khi đạt ngưỡng này, STALL không được trigger (tránh đóng servo khi đồ chưa kịp rơi).
+const float         FIRST_FOOD_THRESHOLD = 0.5f;
 
 // Trạng thái theo dõi tốc độ rơi
 float    flowLastWeight     = 0.0;   // Trọng lượng tại lần kiểm tra trước
@@ -101,6 +123,9 @@ unsigned long predictedCloseAt  = 0;     // Timestamp (ms) dự đoán đóng se
 // ── Stall Detection (Backup path)
 bool     stallDetected      = false;
 unsigned long stallStartMs  = 0;
+// Cờ xác nhận đồ ăn đã thật sự rơi xuống cân (vượt FIRST_FOOD_THRESHOLD).
+// Stall detection chỉ được phép trigger khi cờ này = true.
+bool     firstFoodDetected  = false;
 
 // ── Close-Delay State (dùng chung cho cả 2 path)
 bool     servoClosing       = false; // Đang trong giai đoạn đợi 3s
@@ -136,6 +161,7 @@ bool waitForWiFi(unsigned long timeoutMs);
 bool parseIssuedAtMs(const String& issuedAtStr, uint64_t& outMs);
 void IRAM_ATTR irSensor_ISR();
 void sendHopperAlert();
+void checkHopper();
 void IRAM_ATTR hx711_isr();
 void resetFlowTracker();
 void updateFlowRate();
@@ -149,26 +175,20 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // 1. Setup I2C & LCD
-  Wire.begin(21, 22);
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.print("Booting...");
-
-  // 2. Setup IR Sensor
+  // 1. Setup IR Sensor
   pinMode(irSensorPin, INPUT_PULLUP);
   isHopperEmpty = digitalRead(irSensorPin);
+  stableHopperEmpty = isHopperEmpty;
   attachInterrupt(digitalPinToInterrupt(irSensorPin), irSensor_ISR, CHANGE);
 
-  // 3. Setup Servo (Đóng và Ngắt điện ngay để bảo vệ nguồn)
+  // 2. Setup Servo (Đóng và Ngắt điện ngay để bảo vệ nguồn)
   foodGate.attach(servoPin, 500, 2400);
   foodGate.write(SERVO_STOP);
   delay(500);
   foodGate.detach();
   Serial.println("Servo Init: Closed & Detached");
 
-  // 4. Setup HX711 Loadcell
+  // 3. Setup HX711 Loadcell
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   unsigned long timeout = millis();
   while (!scale.is_ready() && millis() - timeout < 2000) { delay(10); }
@@ -182,22 +202,19 @@ void setup() {
     Serial.println("HX711 Interrupt Attached");
   } else {
     Serial.println("HX711 Error");
-    lcd.setCursor(0,1); lcd.print("Scale Error!");
   }
 
-  // 5. Setup WiFi & MQTT
+  // 4. Setup WiFi & MQTT
   mqtt.setServer(mqtt_server, mqtt_port);
   mqtt.setCallback(mqttCallback);
   mqtt.setBufferSize(512);
 
-  lcd.clear(); lcd.print("WiFi connecting");
   connectWiFi();
 
   espClient.setInsecure();
   configTime(gmtOffset_sec, 0, ntpServer);
 
-  lcd.clear(); lcd.print("System Ready");
-  delay(1000);
+  Serial.println("System Ready");
 }
 
 /******************** LOOP ********************/
@@ -208,6 +225,7 @@ void loop() {
   if (!mqtt.connected()) reconnectMQTT();
   mqtt.loop();
   updateWeight();
+  checkHopper();        // Debounced + rate-limited hopper alert
   handleLogic();
 
   sendTelemetry();
@@ -236,16 +254,18 @@ void resetFlowTracker() {
   weightAtCloseStart  = 0.0;
   weightAtStallCheck  = 0.0;
   stallCheckTime      = millis();
+  firstFoodDetected   = false;
 }
 
-// Cập nhật tốc độ rơi (g/s) - EMA alpha=0.35 để phản ứng nhanh nhưng vẫn mượt
+// Cập nhật tốc độ rơi (g/s) - EMA alpha=0.35 để phản ứng nhanh nhưng vẫn mượt.
+// Chỉ count delta khi vượt FLOW_NOISE_THRESHOLD để tránh nhiễu HX711 làm flowRate giả.
 void updateFlowRate() {
   unsigned long now = millis();
   float elapsed = (now - flowLastTime) / 1000.0f;
   if (elapsed < 0.05f) return;
 
   float delta = weightCurrentVal - flowLastWeight;
-  if (delta > 0.0f) {
+  if (delta > FLOW_NOISE_THRESHOLD) {
     float instantRate = delta / elapsed;
     if (flowSampleCount == 0) {
       flowRate = instantRate; // Mẫu đầu tiên: gán thẳng
@@ -253,15 +273,18 @@ void updateFlowRate() {
       flowRate = 0.35f * instantRate + 0.65f * flowRate; // EMA
     }
     flowSampleCount++;
+    flowLastWeight = weightCurrentVal;
+    flowLastTime   = now;
   }
-  flowLastWeight = weightCurrentVal;
-  flowLastTime   = now;
+  // Nếu delta dưới ngưỡng nhiễu, KHÔNG update flowLastWeight/Time để gom delta cho lần sau.
 }
 
 // Tính (hoặc cập nhật) predictedCloseAt dựa trên flowRate hiện tại
 // Được gọi mỗi vòng loop khi chưa vào close-delay, để ETA luôn chính xác
 void armPredictiveTimer() {
   if (servoClosing) return;               // Đã vào close-delay, không cập nhật nữa
+  // Phải có đồ ăn thật sự rơi xuống cân trước, tránh flowRate ảo từ rung servo khi khởi động
+  if (!firstFoodDetected) return;
   if (flowRate < FLOW_MIN_RATE) return;   // Chưa đủ flow để tính
   if (flowSampleCount < FLOW_STABLE_SAMPLES) return; // Chờ đủ mẫu ổn định
 
@@ -275,25 +298,33 @@ void armPredictiveTimer() {
   timerArmed = true;
 }
 
-// Kích hoạt giai đoạn close-delay (dùng chung cho predictive timer & stall)
+// Kích hoạt giai đoạn close-delay: đóng servo ngay, rồi đợi 3s cho đồ ăn đang rơi hạ xuống
 void enterCloseDelay(const char* reason) {
   if (servoClosing) return; // Đã vào rồi, không kích hoạt lại
+
+  // Đóng servo ngay để dừng thức ăn chảy
+  foodGate.write(SERVO_STOP);
+
   servoClosing        = true;
   servoCloseStartMs   = millis();
   weightAtCloseStart  = weightCurrentVal;
 
   float pct    = (targetWeight > 0) ? (weightCurrentVal / targetWeight * 100.0f) : 0.0f;
-  Serial.printf("[%s] %.1fg/%.1fg (%.0f%%) | flowRate=%.2fg/s -> Wait %.0fs for in-flight food\n",
+  Serial.printf("[%s] %.1fg/%.1fg (%.0f%%) | flowRate=%.2fg/s -> Close servo & wait %.0fs for in-flight food\n",
                 reason, weightCurrentVal, targetWeight, pct, flowRate,
                 CLOSE_DELAY_MS / 1000.0f);
-
-  lcd.setCursor(0, 1);
-  lcd.print("Wait 3s...      ");
 }
 
-// Kiểm tra xem cân có đang "stall" (không tăng) trong STALL_WINDOW_MS không
+// Kiểm tra xem cân có đang "stall" (không tăng) trong STALL_WINDOW_MS không.
+// LƯU Ý: Chỉ trigger sau khi đồ ăn đã thật sự rơi xuống cân (firstFoodDetected),
+// nếu không sẽ đóng servo trước cả khi đồ kịp rơi từ chute.
 bool checkStall() {
   unsigned long now = millis();
+  // Grace period: bỏ qua stall check trong STALL_GRACE_MS đầu để servo mở và thức ăn bắt đầu chảy
+  if (now - feedStartTime < STALL_GRACE_MS) return false;
+  // Chưa thấy đồ ăn rơi -> không thể coi là stall (có thể chỉ là delay rơi từ chute)
+  if (!firstFoodDetected) return false;
+
   if (now - stallCheckTime >= STALL_WINDOW_MS) {
     float gained = weightCurrentVal - weightAtStallCheck;
     weightAtStallCheck = weightCurrentVal;
@@ -339,11 +370,6 @@ void startFeeding(const String& mode, float amount, const String& userId, const 
   // Khởi tạo flow tracker
   resetFlowTracker();
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(mode); lcd.print(": ");
-  lcd.print((int)amount); lcd.print("g");
-
   Serial.printf("START FEEDING: Mode=%s, Target=%.1fg, User=%s\n",
                 mode.c_str(), targetWeight, userId.c_str());
 }
@@ -360,85 +386,64 @@ void stopFeeding() {
   // B. Lấy lượng thức ăn đã phát
   float actualAmount = weightCurrentVal;
 
-  // C. Xác định trạng thái kết quả
+  // C. Xác định trạng thái kết quả (strict: actualAmount phải >= targetWeight)
   String status = "success";
-  if (actualAmount < (targetWeight - WEIGHT_TOLERANCE)) {
+  if (actualAmount + SUCCESS_EPSILON < targetWeight) {
     status = "failed";
-    Serial.printf("FAILED: Only %.1fg/%.1fg dispensed\n", actualAmount, targetWeight);
+    Serial.printf("FAILED: Only %.2fg/%.2fg dispensed\n", actualAmount, targetWeight);
   } else {
-    Serial.printf("SUCCESS: %.1fg dispensed\n", actualAmount);
+    Serial.printf("SUCCESS: %.2fg dispensed (target %.2fg)\n", actualAmount, targetWeight);
   }
 
   // D. Gửi ACK về backend
   sendFeedingAck(currentMode, actualAmount, status);
 
-  // E. Hiển thị kết quả
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  if (status == "success") {
-    lcd.print("SUCCESS: "); lcd.print((int)actualAmount); lcd.print("g");
-  } else {
-    lcd.print("FAILED: "); lcd.print((int)actualAmount); lcd.print("g");
-  }
-  lcd.setCursor(0, 1);
-  lcd.print(currentMode); lcd.print(status == "success" ? " OK" : " FAIL");
+  Serial.printf("STOP FEEDING: Actual=%.2fg, Status=%s\n", actualAmount, status.c_str());
 
-  Serial.printf("STOP FEEDING: Actual=%.1fg, Status=%s\n", actualAmount, status.c_str());
-
-  // F. Reset trạng thái
+  // E. Reset trạng thái
   isFeeding       = false;
   currentMode     = "idle";
   currentUserId   = "";
   currentIssuedAt = "";
-
-  delay(2000);
 }
 
 // 3. LOGIC KIỂM TRA CÂN + SERVO TIMER (Chạy liên tục trong loop)
 void handleLogic() {
-  // Nếu đang không cho ăn -> Hiển thị thời gian và trạng thái sẵn sàng
-  if (!isFeeding) {
-    static unsigned long lastUpdate = 0;
-    if (millis() - lastUpdate > 1000) {
-      lastUpdate = millis();
-      if (getLocalTime(&timeinfo)) {
-        char buf[17];
-        strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
-        lcd.setCursor(0, 0);
-        lcd.print(buf); lcd.print("       ");
-      }
-      lcd.setCursor(0, 1);
-      lcd.print("Ready           ");
-    }
-    if (hopperStateChanged) {
-      hopperStateChanged = false;
-      sendHopperAlert();
-    }
-    return;
-  }
+  if (!isFeeding) return;
 
   // --- ĐANG CHO ĂN ---
   float currentAmount = weightCurrentVal;
   unsigned long now   = millis();
 
-  // Cập nhật tốc độ rơi
-  updateFlowRate();
+  // Đánh dấu thời điểm đồ ăn lần đầu rơi xuống cân -> mở khoá stall + predictive timer.
+  // Reset flow tracker tại đây để xoá flowRate ảo từ rung servo / nhiễu lúc khởi động.
+  if (!firstFoodDetected && currentAmount >= FIRST_FOOD_THRESHOLD) {
+    firstFoodDetected = true;
+    flowLastWeight    = currentAmount;
+    flowLastTime      = now;
+    flowRate          = 0.0f;
+    flowSampleCount   = 0;
+    weightAtStallCheck = currentAmount;
+    stallCheckTime     = now;
+    Serial.printf("[FIRST FOOD] Detected at %.2fg, flow tracker reset, timers armed\n", currentAmount);
+  }
 
-  // ── ĐIỀU KIỆN 1: Đạt đủ target (hoặc vượt)
-  if (currentAmount >= (targetWeight - WEIGHT_TOLERANCE)) {
-    Serial.printf("Target reached! %.1fg >= %.1fg\n", currentAmount, targetWeight);
+  // Chỉ tính flowRate sau khi đồ ăn đã thật sự rơi xuống cân.
+  // Trước đó cân chỉ có nhiễu/rung servo, không phản ánh tốc độ rơi thật.
+  if (firstFoodDetected) {
+    updateFlowRate();
+  }
+
+  // ── ĐIỀU KIỆN 1: Đạt đủ target (strict: phải >= targetWeight)
+  if (currentAmount + SUCCESS_EPSILON >= targetWeight) {
+    Serial.printf("Target reached! %.2fg >= %.2fg\n", currentAmount, targetWeight);
     stopFeeding();
     return;
   }
 
   // ── ĐIỀU KIỆN 2: Timeout an toàn 30s
   if (now - feedStartTime > MAX_FEED_TIME) {
-    Serial.printf("TIMEOUT! Only %.1fg/%.1fg after 30s\n", currentAmount, targetWeight);
-    lcd.clear();
-    lcd.print("TIMEOUT!");
-    lcd.setCursor(0, 1);
-    lcd.print("Not enough food");
-    delay(2000);
+    Serial.printf("TIMEOUT! Only %.2fg/%.2fg after 30s\n", currentAmount, targetWeight);
     stopFeeding();
     return;
   }
@@ -478,16 +483,19 @@ void handleLogic() {
     float gainedSinceClose = weightCurrentVal - weightAtCloseStart;
 
     // Nếu thấy cân tăng đáng kể trong 3s -> đồ ăn vẫn đang rơi, chờ tiếp
-    // Chỉ cancel nếu timer chưa hết và lượng còn xa target
+    // Chỉ cancel nếu timer chưa hết và lượng còn xa target (strict: dùng 1g margin để tránh resume khi gần đạt)
     bool canCancel = !timerArmed  // Chưa có predictive timer -> stall cancel được
                      && gainedSinceClose > 0.5f
-                     && currentAmount < (targetWeight - WEIGHT_TOLERANCE * 2);
+                     && currentAmount < (targetWeight - 1.0f);
     if (canCancel) {
       Serial.printf("[STALL CANCEL] +%.1fg since close start, resuming.\n", gainedSinceClose);
+      // Mở lại servo vì thức ăn đang tiếp tục chảy
+      if (!foodGate.attached()) foodGate.attach(servoPin, 500, 2400);
+      foodGate.write(SERVO_RUN);
+
       stallDetected      = false;
       servoClosing       = false;
       weightAtCloseStart = weightCurrentVal;
-      // Cập nhật lại mốc stall check
       weightAtStallCheck = weightCurrentVal;
       stallCheckTime     = now;
     }
@@ -498,41 +506,6 @@ void handleLogic() {
       stopFeeding();
       return;
     }
-  }
-
-  // ── Cập nhật LCD tiến độ + ETA mỗi 300ms
-  static unsigned long lastLcdUpdate = 0;
-  if (now - lastLcdUpdate > 300) {
-    lastLcdUpdate = now;
-    float pct = (targetWeight > 0) ? (currentAmount / targetWeight * 100.0f) : 0.0f;
-
-    lcd.setCursor(0, 0);
-    lcd.print(currentMode); lcd.print(": ");
-    lcd.print((int)targetWeight); lcd.print("g   ");
-
-    lcd.setCursor(0, 1);
-    char buf[17];
-    if (servoClosing) {
-      // Hiển thị đếm ngược 3s
-      unsigned long remaining3s = CLOSE_DELAY_MS - (now - servoCloseStartMs);
-      snprintf(buf, sizeof(buf), "%.0f/%.0fg cls:%lus",
-               currentAmount, targetWeight, remaining3s / 1000UL);
-    } else if (timerArmed && predictedCloseAt > now) {
-      // Hiển thị ETA theo predictive timer
-      float etaSec = (predictedCloseAt - now) / 1000.0f;
-      snprintf(buf, sizeof(buf), "%.0f/%.0fg ETA:%.0fs",
-               currentAmount, targetWeight, etaSec);
-    } else if (flowRate >= FLOW_MIN_RATE) {
-      // flowRate có nhưng timer chưa arm đủ mẫu
-      float etaSec = (targetWeight - currentAmount) / flowRate;
-      snprintf(buf, sizeof(buf), "%.0f/%.0fg~%.0fs",
-               currentAmount, targetWeight, etaSec);
-    } else {
-      // Chưa có flow rate đủ tin cậy
-      snprintf(buf, sizeof(buf), "%.0f/%.0fg (%.0f%%)",
-               currentAmount, targetWeight, pct);
-    }
-    lcd.print(buf);
   }
 }
 
@@ -599,12 +572,36 @@ void updateWeight() {
     detachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN));
 
     if (scale.is_ready()) {
-      float raw = scale.get_units(1);
-      weightCurrentVal = (raw < 0) ? 0.0 : raw;
+      float raw = scale.get_units(HX711_READ_SAMPLES);
+      weightRawVal     = raw;                       // giữ giá trị thật (có thể âm) cho debug
+      weightCurrentVal = (raw < 0) ? 0.0 : raw;     // clamp âm về 0 cho feeding logic
     }
 
     hx711DataReady = false;
     attachInterrupt(digitalPinToInterrupt(LOADCELL_DOUT_PIN), hx711_isr, FALLING);
+
+    // ── Log cân nặng ra Serial theo chu kỳ (không spam mỗi sample HX711)
+    static unsigned long lastWeightLog = 0;
+    unsigned long now = millis();
+    if (now - lastWeightLog >= WEIGHT_LOG_INTERVAL_MS) {
+      lastWeightLog = now;
+
+      // Cảnh báo wiring sai: raw âm đáng kể khi đặt food lên cân -> chắc chắn có vấn đề.
+      // Nguyên nhân thường gặp: load cell nối ngược cực (E+/E- hoặc A+/A- đảo)
+      // hoặc CALIBRATING sai dấu (thử -413.96 thay vì 413.96).
+      if (weightRawVal < -0.5f) {
+        Serial.printf("[LOADCELL WARN] raw=%.2fg ÂM -> KIỂM TRA WIRING load cell hoặc đổi dấu CALIBRATING\n",
+                      weightRawVal);
+      }
+
+      if (isFeeding) {
+        float pct = (targetWeight > 0) ? (weightCurrentVal / targetWeight * 100.0f) : 0.0f;
+        Serial.printf("[LOADCELL] %.2f g (raw %.2f, target %.1f g, %.0f%%, flow %.2f g/s)\n",
+                      weightCurrentVal, weightRawVal, targetWeight, pct, flowRate);
+      } else {
+        Serial.printf("[LOADCELL] %.2f g (raw %.2f, idle)\n", weightCurrentVal, weightRawVal);
+      }
+    }
   }
 }
 
@@ -647,7 +644,7 @@ void sendFeedingAck(const String& mode, float actualAmount, const String& status
 
   Serial.println("ACK JSON: " + out);
 
-  bool published = mqtt.publish(topic_ack.c_str(), out.c_str(), true);
+  bool published = mqtt.publish(topic_ack.c_str(), out.c_str(), false); // không dùng retained
   Serial.println("ACK sent: " + String(published ? "OK" : "FAILED"));
   Serial.println("  Mode: " + mode);
   Serial.println("  Amount: " + String(actualAmount) + "g");
@@ -669,7 +666,6 @@ bool waitForWiFi(unsigned long timeoutMs) {
       return false;
     }
     Serial.print(".");
-    lcd.print(".");
     delay(500);
   }
   Serial.println("\nWiFi Connected!");
@@ -698,10 +694,6 @@ void reconnectMQTT() {
     Serial.printf("Subscribed to '%s': %s\n", topic_command, subOk ? "OK" : "FAILED");
 
     sendTelemetry(true);
-
-    lcd.clear();
-    lcd.print("MQTT Connected");
-    delay(1000);
   } else {
     Serial.print("Failed, rc=");
     Serial.println(mqtt.state());
@@ -710,12 +702,47 @@ void reconnectMQTT() {
 
 /******************** IR SENSOR INTERRUPT *******************/
 
+// ISR chỉ ghi nhận edge time. Việc đọc + debounce làm trong main loop để
+// tránh bouncing tạo ra hàng loạt alert.
 void IRAM_ATTR irSensor_ISR() {
+  lastIrEdgeMs = millis();
+}
+
+// Gọi mỗi loop. Sau khi tín hiệu IR ổn định IR_DEBOUNCE_MS,
+// đọc lại trạng thái và chỉ gửi alert nếu state thật sự đổi
+// và đã qua IR_ALERT_MIN_INTERVAL kể từ alert trước.
+void checkHopper() {
+  unsigned long edgeMs = lastIrEdgeMs;
+  if (edgeMs == 0) return;
+
+  unsigned long now = millis();
+  if (now - edgeMs < IR_DEBOUNCE_MS) return; // Chờ ổn định
+
+  // Sample state ổn định
   bool currentState = digitalRead(irSensorPin);
-  if (currentState != isHopperEmpty) {
-    isHopperEmpty      = currentState;
-    hopperStateChanged = true;
+
+  // Chỉ reset edge time nếu state đã đứng im suốt window debounce
+  // (lastIrEdgeMs có thể đã được ISR cập nhật trong lúc chờ)
+  if (lastIrEdgeMs != edgeMs) return; // Vẫn còn bouncing -> đợi tiếp
+
+  noInterrupts();
+  lastIrEdgeMs = 0;
+  interrupts();
+
+  isHopperEmpty = currentState;
+
+  if (currentState == stableHopperEmpty) return; // Không thay đổi thực
+  stableHopperEmpty = currentState;
+
+  // Rate-limit MQTT alert
+  if (now - lastHopperAlertMs < IR_ALERT_MIN_INTERVAL) {
+    Serial.printf("[Hopper] State changed but rate-limited (last %lus ago)\n",
+                  (now - lastHopperAlertMs) / 1000UL);
+    return;
   }
+
+  lastHopperAlertMs = now;
+  sendHopperAlert();
 }
 
 void sendHopperAlert() {
