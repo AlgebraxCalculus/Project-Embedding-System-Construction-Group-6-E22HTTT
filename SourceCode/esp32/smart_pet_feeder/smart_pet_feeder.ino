@@ -153,7 +153,8 @@ void reconnectMQTT();
 void mqttCallback(char* t, byte* p, unsigned int l);
 void updateWeight();
 void startFeeding(const String& mode, float amount, const String& userId, const String& issuedAt);
-void stopFeeding();
+void stopFeeding(const String& forceStatus = "");
+void sendFeedReject(const String& mode, float amount, const String& userId, const String& issuedAt);
 void handleLogic();
 void sendTelemetry(bool immediate = false);
 void sendFeedingAck(const String& mode, float actualAmount, const String& status);
@@ -375,7 +376,7 @@ void startFeeding(const String& mode, float amount, const String& userId, const 
 }
 
 // 2. DỪNG CHO ĂN
-void stopFeeding() {
+void stopFeeding(const String& forceStatus) {
   if (!isFeeding) return;
 
   // A. Đóng Servo về 0 độ
@@ -386,12 +387,16 @@ void stopFeeding() {
   // B. Lấy lượng thức ăn đã phát
   float actualAmount = weightCurrentVal;
 
-  // C. Xác định trạng thái kết quả (strict: actualAmount phải >= targetWeight)
-  String status = "success";
-  if (actualAmount + SUCCESS_EPSILON < targetWeight) {
+  // C. Xác định trạng thái kết quả
+  String status;
+  if (forceStatus.length() > 0) {
+    status = forceStatus;
+    Serial.printf("STOP (%s): %.2fg/%.2fg dispensed\n", forceStatus.c_str(), actualAmount, targetWeight);
+  } else if (actualAmount + SUCCESS_EPSILON < targetWeight) {
     status = "failed";
     Serial.printf("FAILED: Only %.2fg/%.2fg dispensed\n", actualAmount, targetWeight);
   } else {
+    status = "success";
     Serial.printf("SUCCESS: %.2fg dispensed (target %.2fg)\n", actualAmount, targetWeight);
   }
 
@@ -410,6 +415,13 @@ void stopFeeding() {
 // 3. LOGIC KIỂM TRA CÂN + SERVO TIMER (Chạy liên tục trong loop)
 void handleLogic() {
   if (!isFeeding) return;
+
+  // Hopper trở nên rỗng trong khi đang cho ăn -> dừng ngay
+  if (stableHopperEmpty) {
+    Serial.println("Hopper empty during feeding! Stopping immediately.");
+    stopFeeding("hopper_empty");
+    return;
+  }
 
   // --- ĐANG CHO ĂN ---
   float currentAmount = weightCurrentVal;
@@ -559,6 +571,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   if (!isFeeding && currentMode == "idle") {
     lastHandledIssuedAt = issuedAtMs;
+    if (stableHopperEmpty) {
+      Serial.println("Hopper empty! Feed command rejected.");
+      sendFeedReject(mode, amount, userId, issuedAt);
+      return;
+    }
     startFeeding(mode, amount, userId, issuedAt);
   } else {
     Serial.println("Busy feeding, command ignored");
@@ -650,6 +667,27 @@ void sendFeedingAck(const String& mode, float actualAmount, const String& status
   Serial.println("  Amount: " + String(actualAmount) + "g");
   Serial.println("  Status: " + status);
   Serial.println("  issuedAt: " + String(currentIssuedAt));
+}
+
+// Gửi ACK từ chối lệnh cho ăn do hopper rỗng (status = "hopper_empty")
+void sendFeedReject(const String& mode, float amount, const String& userId, const String& issuedAt) {
+  if (!mqtt.connected()) return;
+
+  StaticJsonDocument<384> doc;
+  doc["device_id"]    = device_id;
+  doc["timestamp"]    = millis();
+  doc["type"]         = "feeding_complete";
+  doc["mode"]         = mode;
+  doc["amount"]       = 0;
+  doc["targetAmount"] = amount;
+  doc["status"]       = "hopper_empty";
+  doc["userId"]       = userId;
+  doc["issuedAt"]     = issuedAt;
+
+  String out;
+  serializeJson(doc, out);
+  mqtt.publish(topic_ack.c_str(), out.c_str(), false);
+  Serial.println("Feed rejected (hopper empty). ACK sent.");
 }
 
 void connectWiFi() {

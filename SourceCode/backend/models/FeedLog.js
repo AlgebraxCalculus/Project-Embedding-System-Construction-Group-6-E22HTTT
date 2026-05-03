@@ -23,7 +23,7 @@ const feedLogSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["success", "failed"],
+      enum: ["success", "failed", "hopper_empty"],
       default: "success",
     },
     startTime: {

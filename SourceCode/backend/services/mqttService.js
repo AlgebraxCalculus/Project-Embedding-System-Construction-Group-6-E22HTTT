@@ -45,13 +45,19 @@ client.on("connect", () => {
   console.log(`   Broker: ${brokerUrl.replace(/\/\/.*@/, "//***:***@")}`);
   console.log(`   Client ID: ${clientId}`);
 
-  // Subscribe to all device ack topics so backend can receive feed ACKs from ESP32 devices
-  // ack topic pattern on device: feeder/{deviceId}/ack
   client.subscribe("feeder/+/ack", { qos: 1 }, (err, granted) => {
     if (err) {
       console.error("Failed to subscribe to ack topics:", err);
     } else {
       console.log("Subscribed to ack topics:", granted.map(g => g.topic).join(", "));
+    }
+  });
+
+  client.subscribe("feeder/+/alert", { qos: 1 }, (err, granted) => {
+    if (err) {
+      console.error("Failed to subscribe to alert topics:", err);
+    } else {
+      console.log("Subscribed to alert topics:", granted.map(g => g.topic).join(", "));
     }
   });
 });
@@ -97,9 +103,9 @@ client.on("message", (topicName, payload) => {
         // No pending waiter — still log for debugging
         console.log("Received feeding_complete but no pending request for issuedAt:", issuedAt);
       }
-    } else {
-      // Not an ack of interest; ignore or log
-      // console.log("MQTT message received on", topicName, "-", str);
+    } else if (type === "alert") {
+      const isEmpty = parsed?.is_empty;
+      console.log(`[HOPPER] Device ${parsed?.device_id}: ${isEmpty ? "Empty" : "Refilled"}`);
     }
   } catch (err) {
     console.error("Failed to parse MQTT message:", err);

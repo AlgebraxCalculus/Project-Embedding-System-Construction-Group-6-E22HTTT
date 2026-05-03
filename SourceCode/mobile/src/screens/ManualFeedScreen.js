@@ -63,12 +63,15 @@ export default function ManualFeedScreen() {
       const amount = Number(feedLog.amount ?? 0);
       const target = Number(feedLog.targetAmount ?? 10);
       const isSuccess = feedLog.status === 'success';
+      const isHopperEmpty = feedLog.status === 'hopper_empty';
       const amountStr = amount.toFixed(1);
       const targetStr = target.toFixed(0);
 
       setAckMessage(
         isSuccess
           ? `✅ Đã cho ăn ${amountStr}g thành công!`
+          : isHopperEmpty
+          ? `⚠️ Không thể cho ăn: Hopper rỗng, vui lòng nạp thêm thức ăn`
           : `❌ Cho ăn thất bại: chỉ phát được ${amountStr}g / ${targetStr}g`
       );
     } catch (err) {
@@ -135,13 +138,16 @@ export default function ManualFeedScreen() {
       const amount = Number(feedLog.amount ?? data.parsedAmount ?? 0);
       const target = Number(feedLog.targetAmount ?? data.parsedAmount ?? 10);
       const isSuccess = feedLog.status === 'success';
+      const isHopperEmpty = feedLog.status === 'hopper_empty';
       const amountStr = amount.toFixed(1);
       const targetStr = target.toFixed(0);
 
       setAckMessage(
         isSuccess
-          ? `Lenh: "${text}"\nDa cho an ${amountStr}g thanh cong!`
-          : `Lenh: "${text}"\nCho an that bai: chi phat duoc ${amountStr}g / ${targetStr}g`
+          ? `Lệnh: "${text}"\nĐã cho ăn ${amountStr}g thành công!`
+          : isHopperEmpty
+          ? `Lệnh: "${text}"\n⚠️ Không thể cho ăn: Hopper rỗng`
+          : `Lệnh: "${text}"\nCho ăn thất bại: chỉ phát được ${amountStr}g / ${targetStr}g`
       );
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Gui lenh that bai';

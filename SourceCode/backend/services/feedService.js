@@ -27,7 +27,7 @@ export const triggerManualFeed = async ({ userId, amount }) => {
     // ack expected shape: { device_id, timestamp, type: "feeding_complete", mode, amount, targetAmount, status, userId, issuedAt }
     feedLog.amount = ack.amount ?? 0;
     feedLog.targetAmount = ack.targetAmount ?? amount;
-    feedLog.status = (ack.status === "success") ? "success" : "failed";
+    feedLog.status = ["success", "hopper_empty"].includes(ack.status) ? ack.status : "failed";
     feedLog.endTime = new Date();
 
     await feedLog.save();
@@ -64,7 +64,7 @@ export const triggerScheduledFeed = async ({ userId, amount, scheduleId }) => {
 
     feedLog.amount = ack.amount ?? 0;
     feedLog.targetAmount = ack.targetAmount ?? amount;
-    feedLog.status = (ack.status === "success") ? "success" : "failed";
+    feedLog.status = ["success", "hopper_empty"].includes(ack.status) ? ack.status : "failed";
     feedLog.endTime = new Date();
 
     await feedLog.save();
@@ -100,7 +100,7 @@ export const triggerVoiceFeed = async ({ userId, amount, voiceCommand }) => {
 
     feedLog.amount = ack.amount ?? 0;
     feedLog.targetAmount = ack.targetAmount ?? amount;
-    feedLog.status = (ack.status === "success") ? "success" : "failed";
+    feedLog.status = ["success", "hopper_empty"].includes(ack.status) ? ack.status : "failed";
     feedLog.endTime = new Date();
 
     await feedLog.save();

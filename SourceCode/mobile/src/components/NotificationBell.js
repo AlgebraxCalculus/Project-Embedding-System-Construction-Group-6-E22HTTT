@@ -17,6 +17,7 @@ const methodLabels = {
   manual: 'Thủ công',
   voice: 'Giọng nói',
   scheduled: 'Theo lịch',
+  alert: 'Cảnh báo',
 };
 
 export default function NotificationBell() {
@@ -43,6 +44,7 @@ export default function NotificationBell() {
       const feedLogs = response.data?.feedLogs || [];
       const mapped = feedLogs.map((log) => {
         const isSuccess = log.status === 'success';
+        const isHopperEmpty = log.status === 'hopper_empty';
         const amount = Number(log.amount ?? 0);
         const target = Number(log.targetAmount ?? amount);
         const amountStr = amount.toFixed(1);
@@ -53,6 +55,8 @@ export default function NotificationBell() {
           : 'Cho ăn thủ công';
         const message = isSuccess
           ? `${methodPrefix} ${amountStr}g thành công`
+          : isHopperEmpty
+          ? `${methodPrefix} thất bại: Hopper rỗng`
           : `${methodPrefix} thất bại (${amountStr}g/${targetStr}g)`;
         return {
           _id: log._id,
@@ -82,6 +86,7 @@ export default function NotificationBell() {
         const amount = Number(extractAckAmount(data) ?? 0);
         const target = Number(data.targetAmount ?? amount);
         const isSuccess = data.status === 'success';
+        const isHopperEmpty = data.status === 'hopper_empty';
         const isScheduled = isScheduledAckPayload(data);
         const method = isScheduled ? 'scheduled' : (data.mode || 'manual');
         const amountStr = amount.toFixed(1);
@@ -93,6 +98,8 @@ export default function NotificationBell() {
           : 'Cho ăn thủ công';
         const message = isSuccess
           ? `${methodPrefix} ${amountStr}g thành công`
+          : isHopperEmpty
+          ? `${methodPrefix} thất bại: Hopper rỗng`
           : `${methodPrefix} thất bại (${amountStr}g/${targetStr}g)`;
 
         const newNotification = {
@@ -100,7 +107,7 @@ export default function NotificationBell() {
           message,
           method,
           amount,
-          status: isSuccess ? 'success' : 'failed',
+          status: isSuccess ? 'success' : isHopperEmpty ? 'hopper_empty' : 'failed',
           createdAt: new Date().toISOString(),
           read: false,
         };
@@ -114,10 +121,13 @@ export default function NotificationBell() {
         }
       },
       onAlert: (data) => {
+        const isEmpty = data.is_empty === true;
         const newNotification = {
           _id: Date.now().toString(),
-          message: data.message || 'Cảnh báo từ thiết bị!',
-          method: 'manual', // hoặc type alert
+          message: isEmpty
+            ? 'Hopper rỗng! Vui lòng nạp thêm thức ăn.'
+            : 'Hopper đã được nạp đầy. Máy cho ăn sẵn sàng.',
+          method: 'alert',
           createdAt: new Date().toISOString(),
           read: false,
         };
@@ -160,8 +170,8 @@ export default function NotificationBell() {
   };
 
   const renderItem = ({ item }) => (
-    <View style={styles.notificationItem}>
-      <Text style={[styles.messageText, !item.read && styles.unreadMessage]}>
+    <View style={[styles.notificationItem, item.method === 'alert' && styles.alertItem]}>
+      <Text style={[styles.messageText, !item.read && styles.unreadMessage, item.method === 'alert' && styles.alertMessage]}>
         {item.message || 'Hệ thống đã cho ăn'}
       </Text>
       <Text style={styles.subText}>
@@ -267,8 +277,10 @@ const styles = StyleSheet.create({
   list: { maxHeight: 300 },
   emptyText: { textAlign: 'center', color: '#94a3b8', marginVertical: 20 },
   notificationItem: { paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+  alertItem: { backgroundColor: '#fffbeb' },
   messageText: { fontSize: 14, color: '#0f172a' },
   unreadMessage: { fontWeight: '700' },
+  alertMessage: { color: '#b45309' },
   subText: { fontSize: 12, color: '#64748b', marginTop: 4 },
   transcriptText: { fontSize: 11, color: '#94a3b8', marginTop: 4, fontStyle: 'italic' },
 });

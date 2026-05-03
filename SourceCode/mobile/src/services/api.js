@@ -1,7 +1,7 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://10.45.113.183:5000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://192.168.1.11:5000';
 const SPEECH_URL = process.env.EXPO_PUBLIC_SPEECH_URL || BASE_URL.replace(':5000', ':3001');
 
 const api = axios.create({ baseURL: BASE_URL });
