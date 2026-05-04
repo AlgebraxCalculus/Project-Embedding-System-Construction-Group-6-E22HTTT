@@ -61,7 +61,7 @@ export default function ManualFeedScreen() {
       const { data } = await FeedAPI.manual();
       const feedLog = data.feedLog || {};
       const amount = Number(feedLog.amount ?? 0);
-      const target = Number(feedLog.targetAmount ?? 10);
+      const target = Number(feedLog.targetAmount ?? 5);
       const isSuccess = feedLog.status === 'success';
       const isHopperEmpty = feedLog.status === 'hopper_empty';
       const amountStr = amount.toFixed(1);
@@ -136,7 +136,7 @@ export default function ManualFeedScreen() {
       const { data } = await FeedAPI.voice(text);
       const feedLog = data.feedLog || {};
       const amount = Number(feedLog.amount ?? data.parsedAmount ?? 0);
-      const target = Number(feedLog.targetAmount ?? data.parsedAmount ?? 10);
+      const target = Number(feedLog.targetAmount ?? data.parsedAmount ?? 5);
       const isSuccess = feedLog.status === 'success';
       const isHopperEmpty = feedLog.status === 'hopper_empty';
       const amountStr = amount.toFixed(1);
@@ -177,7 +177,7 @@ export default function ManualFeedScreen() {
         {/* Manual Feed Card */}
         <View style={s.card}>
           <Text style={s.cardTitle}>Cho ăn thủ công</Text>
-          <Text style={s.cardSub}>Phát thức ăn ngay lập tức (mặc định 10g)</Text>
+          <Text style={s.cardSub}>Phát thức ăn ngay lập tức (mặc định 5g)</Text>
           <TouchableOpacity
             style={[s.feedBtn, loading && s.feedBtnDisabled]}
             onPress={handleFeedNow}
@@ -198,7 +198,7 @@ export default function ManualFeedScreen() {
         <View style={s.card}>
           <Text style={s.cardTitle}>{`L\u1EC7nh gi\u1ECDng n\u00F3i`}</Text>
           <Text style={s.cardSub}>
-            {`Nh\u1EA5n n\u00FAt micro, n\u00F3i: "cho \u0103n" (m\u1EB7c \u0111\u1ECBnh 10g) ho\u1EB7c "cho \u0103n 200 gram"`}
+            {`Nh\u1EA5n n\u00FAt micro, n\u00F3i: "cho \u0103n" (m\u1EB7c \u0111\u1ECBnh 5g) ho\u1EB7c "cho \u0103n 200 gram"`}
           </Text>
 
           <TouchableOpacity

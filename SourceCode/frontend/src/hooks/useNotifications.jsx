@@ -122,7 +122,7 @@ export const NotificationProvider = ({ children }) => {
             seenScheduledIdsRef.current.add(log._id);
             added = true;
 
-            const amount = log.amount ?? log.targetAmount ?? 10;
+            const amount = log.amount ?? log.targetAmount ?? 5;
             const message =
               browserLocale === 'vi-VN'
                 ? `Lịch cho ăn ${amount}g thành công`

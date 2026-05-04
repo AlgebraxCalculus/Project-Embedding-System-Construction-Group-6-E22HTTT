@@ -76,10 +76,10 @@ const int SERVO_RUN    = 100;  // Góc mở (90 độ)
 Servo foodGate;
 
 /************** FEEDING CONFIG **************/
-const float DEFAULT_FEED_AMOUNT = 10.0;
+const float DEFAULT_FEED_AMOUNT = 5.0;
 const unsigned long MAX_FEED_TIME = 30000; // 30 giây timeout an toàn
 // Strict mode: success requires actualAmount >= targetWeight.
-// Float noise margin chỉ dùng để chấp nhận bằng đúng (e.g. 9.999 ~= 10.000).
+// Float noise margin chỉ dùng để chấp nhận bằng đúng (e.g. 4.999 ~= 5.000).
 const float SUCCESS_EPSILON = 0.05;        // 50 mg float noise margin
 
 bool isFeeding = false;
@@ -553,7 +553,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 
   if (amount <= 0 || amount > 200) {
-    Serial.println("Invalid amount, using default 10g");
+    Serial.println("Invalid amount, using default 5g");
     amount = DEFAULT_FEED_AMOUNT;
   }
 

@@ -35,7 +35,7 @@ const ManualFeed = () => {
       });
 
       if (isScheduledAckPayload(payload)) {
-        const amount = extractAckAmount(payload, 10);
+        const amount = extractAckAmount(payload, 5);
         addNotification({
           method: 'scheduled',
           type: 'info',
@@ -70,7 +70,7 @@ const ManualFeed = () => {
       const { data } = await FeedAPI.manual();
       const feedLog = data.feedLog || {};
       const amount = Number(feedLog.amount ?? 0);
-      const target = Number(feedLog.targetAmount ?? 10);
+      const target = Number(feedLog.targetAmount ?? 5);
       const isSuccess = feedLog.status === 'success';
       const amountStr = amount.toFixed(1);
       const targetStr = target.toFixed(0);
@@ -146,9 +146,9 @@ const ManualFeed = () => {
       recognition.onstart = () => {
         setMicStatus('listening');
         if (language === 'vi-VN') {
-          setAckMessage('🎙️ Đang lắng nghe... Nói "cho ăn" (mặc định 10g) hoặc "cho ăn 200 gram"');
+          setAckMessage('🎙️ Đang lắng nghe... Nói "cho ăn" (mặc định 5g) hoặc "cho ăn 200 gram"');
         } else {
-          setAckMessage('🎙️ Listening... Say "feed" (default 10g) or "feed 200 grams"');
+          setAckMessage('🎙️ Listening... Say "feed" (default 5g) or "feed 200 grams"');
         }
       };
 
@@ -173,9 +173,9 @@ const ManualFeed = () => {
 
         if (!hasTrigger) {
           if (language === 'vi-VN') {
-            setAckMessage(`🎙️ Đã nghe: "${transcript}"\n⚠️ Không tìm thấy cụm kích hoạt. Vui lòng nói: "cho ăn" (mặc định 10g) hoặc "cho ăn 200 gram"`);
+            setAckMessage(`🎙️ Đã nghe: "${transcript}"\n⚠️ Không tìm thấy cụm kích hoạt. Vui lòng nói: "cho ăn" (mặc định 5g) hoặc "cho ăn 200 gram"`);
           } else {
-            setAckMessage(`🎙️ Heard: "${transcript}"\n⚠️ No trigger phrase found. Please say: "feed" (default 10g) or "feed 200 grams"`);
+            setAckMessage(`🎙️ Heard: "${transcript}"\n⚠️ No trigger phrase found. Please say: "feed" (default 5g) or "feed 200 grams"`);
           }
           setToast({
             message: language === 'vi-VN' 
@@ -190,7 +190,7 @@ const ManualFeed = () => {
         // Kiểm tra số lượng
         const amountMatch = transcript.match(/(\d+)\s*(gram|gr|g|grams)\b/i);
         const hasAmount = !!amountMatch;
-        const detectedAmount = amountMatch ? parseInt(amountMatch[1], 10) : 10;
+        const detectedAmount = amountMatch ? parseInt(amountMatch[1], 10) : 5;
         
         // Hiển thị thông tin về số lượng
         if (hasAmount) {
@@ -201,9 +201,9 @@ const ManualFeed = () => {
           }
         } else {
           if (language === 'vi-VN') {
-            setAckMessage(`🎙️ Đã nghe: "${transcript}"\n📊 Không có số lượng, dùng mặc định: 10g\n⏳ Đang gửi lệnh...`);
+            setAckMessage(`🎙️ Đã nghe: "${transcript}"\n📊 Không có số lượng, dùng mặc định: 5g\n⏳ Đang gửi lệnh...`);
           } else {
-            setAckMessage(`🎙️ Heard: "${transcript}"\n📊 No amount, using default: 10g\n⏳ Sending command...`);
+            setAckMessage(`🎙️ Heard: "${transcript}"\n📊 No amount, using default: 5g\n⏳ Sending command...`);
           }
         }
 

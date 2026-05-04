@@ -41,7 +41,7 @@ export const isScheduledAckPayload = (payload) => {
   return hasScheduleMarkers(JSON.stringify(payload));
 };
 
-export const extractAckAmount = (payload, fallback = 10) => {
+export const extractAckAmount = (payload, fallback = 5) => {
   if (!payload) return fallback;
   if (typeof payload === 'object') {
     if (typeof payload.amount === 'number') return payload.amount;

@@ -63,7 +63,7 @@ export const isScheduledAckPayload = (payload) => {
   return false;
 };
 
-export const extractAckAmount = (payload, fallback = 10) => {
+export const extractAckAmount = (payload, fallback = 5) => {
   if (!payload) return fallback;
 
   if (typeof payload === 'object') {

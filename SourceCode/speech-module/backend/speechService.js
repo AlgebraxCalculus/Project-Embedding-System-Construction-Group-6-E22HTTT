@@ -213,6 +213,8 @@ class SpeechService {
 
     // Xác định action
     const feedKeywords = [
+      'ăn',
+      'an',
       'cho ăn',
       'cho an',
       'cho thú cưng ăn',

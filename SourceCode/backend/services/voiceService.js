@@ -1,5 +1,7 @@
-// Vietnamese trigger phrases: "cho ăn", "cho an"
-const VI_FEED_TRIGGER_REGEX = /cho\s*ăn|cho\s*an/i;
+// Vietnamese trigger phrases: "cho ăn", "cho an", hoặc "ăn"/"an" đứng một mình.
+// Dạng đứng một mình yêu cầu word-boundary (đầu chuỗi/khoảng trắng phía trước,
+// khoảng trắng/dấu câu/cuối chuỗi phía sau) để tránh match nhầm với "ban", "anh", v.v.
+const VI_FEED_TRIGGER_REGEX = /(?:^|\s)(?:cho\s+)?(?:ăn|an)(?=\s|$|[.,!?])/i;
 // English trigger phrases: "feed", "give food", "dispense"
 const EN_FEED_TRIGGER_REGEX = /feed|give\s+food|dispense/i;
 
@@ -28,13 +30,13 @@ export const parseVoiceCommand = (text = "") => {
     return { 
       shouldFeed: false, 
       amount: null, 
-      error: "Không tìm thấy cụm từ kích hoạt trong lệnh. Tiếng Việt: 'cho ăn', Tiếng Anh: 'feed' (ví dụ: 'cho ăn 200 gram' hoặc 'feed 200 grams')" 
+      error: "Không tìm thấy cụm từ kích hoạt trong lệnh. Tiếng Việt: 'ăn' hoặc 'cho ăn', Tiếng Anh: 'feed' (ví dụ: 'ăn 200 gram', 'cho ăn 200 gram' hoặc 'feed 200 grams')"
     };
   }
 
   // Extract amount (supports both Vietnamese and English)
-  // If no amount specified, default to 10 grams
-  const DEFAULT_AMOUNT = 10;
+  // If no amount specified, default to 5 grams
+  const DEFAULT_AMOUNT = 5;
   const amountMatch = normalized.match(AMOUNT_REGEX);
   
   let amount = DEFAULT_AMOUNT; // Default amount if not specified
@@ -55,7 +57,7 @@ export const parseVoiceCommand = (text = "") => {
       }
     }
   }
-  // If no amount found, use default (10g)
+  // If no amount found, use default (5g)
 
   return { shouldFeed: true, amount, error: null };
 };
